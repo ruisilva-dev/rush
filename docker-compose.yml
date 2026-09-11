@@ -1,0 +1,47 @@
+name: rush
+
+services:
+  postgres:
+    image: postgres:18-bookworm
+    container_name: rush_postgres
+    restart: unless-stopped
+    environment: &db-credentials
+      POSTGRES_USER: ${POSTGRES_USER:?Variable POSTGRES_USER is required. Please set it in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Variable POSTGRES_DB is required. Please set it in .env}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_user_password
+    secrets:
+      - db_user_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rush_web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *db-credentials
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+    secrets:
+      - db_user_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+
+volumes:
+  postgres_data:
+
+secrets:
+  db_user_password:
+    file: ./secrets/db_user_password.txt
