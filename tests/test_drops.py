@@ -88,9 +88,13 @@ async def test_create_drop_atomic_rollback_on_unit_generation_failure(
 
     # Simulate a mid-transaction crash during unit insertion
     original_execute = db_session.execute
+    insert_attempted = False
 
     async def mock_execute(stmt: object, *args: object, **kwargs: object) -> Result:
+        nonlocal insert_attempted
+
         if str(stmt).strip().startswith("INSERT INTO drop_units"):
+            insert_attempted = True
             raise RuntimeError("Database connection dropped during unit provisioning")
         return await original_execute(stmt, *args, **kwargs)
 
@@ -99,6 +103,9 @@ async def test_create_drop_atomic_rollback_on_unit_generation_failure(
             await client.post("/drops", json=payload)
         except Exception:
             pass
+
+    # Ensure error occurred during drop provisioning
+    assert insert_attempted is True
 
     # Confirm atomic rollback: no orphan Drop was committed
     orphan_drop = await db_session.scalar(
