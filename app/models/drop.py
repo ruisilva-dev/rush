@@ -29,11 +29,6 @@ class Drop(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("uuidv7()"))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Status transitions (draft -> scheduled -> active -> completed) are not yet
-    # driven by anything — no endpoint sets them, and nothing checks `status`
-    # before allowing a purchase. Decide in Issue #4 whether transitions are
-    # time-computed (derived from scheduled_at) or explicitly set/stored, and
-    # whether the purchase endpoint should gate on this field at all.
     status: Mapped[DropStatus] = mapped_column(
         SAEnum(
             DropStatus,
