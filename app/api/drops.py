@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import insert, literal, select, func, Select
 from uuid import UUID
 from app.schemas.drop import DropResponse, DropCreateRequest
+from app.schemas.purchase import PurchaseResponse, PurchaseRequest
 from app.core.db import get_db
 from app.models.drop import DropStatus, Drop
 from app.models.drop_unit import DropUnit, DropUnitStatus
@@ -112,3 +113,49 @@ async def get_drop(id: UUID, db: AsyncSession = Depends(get_db)) -> DropResponse
         created_at=drop.created_at,
         updated_at=drop.updated_at,
     )
+
+
+@router.post("/{id}/purchase-naive", response_model=PurchaseResponse)
+async def purchase_naive(
+    id: UUID, payload: PurchaseRequest, db: AsyncSession = Depends(get_db)
+) -> PurchaseResponse:
+    stmt = select(Drop, func.now()).where(Drop.id == id)
+    result = await db.execute(stmt)
+    row = result.first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Drop with ID '{id}' not found",
+        )
+
+    drop, db_now = row
+    if drop.scheduled_at is None or db_now <= drop.scheduled_at:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "not_yet_open", "message": "Drop isn't open yet."},
+        )
+
+    stmt = (
+        select(DropUnit)
+        .where(DropUnit.drop_id == id, DropUnit.status == DropUnitStatus.AVAILABLE)
+        .limit(1)
+    )
+
+    unit = await db.scalar(stmt)
+    if not unit:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "sold_out", "message": "No units remaining for this drop."},
+        )
+
+    # VULNERABLE: Baseline implementation without row-level locking
+    # (e.g., SELECT ... FOR UPDATE).
+    # Under concurrent load, multiple transactions can read and claim the same unit,
+    # causing overselling.
+    unit.status = DropUnitStatus.PURCHASED
+    unit.held_by_user_id = payload.user_id
+
+    await db.commit()
+
+    return unit

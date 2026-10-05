@@ -1,20 +1,46 @@
+name: rush-test
+
 services:
+  test_postgres:
+    image: postgres:18-bookworm
+    environment:
+      POSTGRES_USER: rush_test
+      POSTGRES_DB: rush_test
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_user_password
+    secrets:
+      - db_user_password
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rush_test -d rush_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   test:
     build:
       context: .
       dockerfile: Dockerfile
       target: test
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: rush_test
+      POSTGRES_DB: rush_test
       POSTGRES_PASSWORD_FILE: /run/secrets/db_user_password
-      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
-      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_HOST: test_postgres
+      POSTGRES_PORT: 5432
     secrets:
       - db_user_password
     volumes:
       - ./app:/app/app
       - ./tests:/app/tests
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
     depends_on:
-      postgres:
+      test_postgres:
         condition: service_healthy
+    command: sh -c "alembic upgrade head && pytest"
+
+secrets:
+  db_user_password:
+    file: ./secrets/db_user_password.txt
