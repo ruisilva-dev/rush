@@ -159,3 +159,54 @@ async def purchase_naive(
     await db.commit()
 
     return unit
+
+
+@router.post("/{id}/purchase-pessimistic", response_model=PurchaseResponse)
+async def purchase_pessimistic(
+    id: UUID, payload: PurchaseRequest, db: AsyncSession = Depends(get_db)
+) -> PurchaseResponse:
+    stmt = select(Drop, func.now()).where(Drop.id == id)
+    result = await db.execute(stmt)
+    row = result.first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Drop with ID '{id}' not found",
+        )
+
+    drop, db_now = row
+    if drop.scheduled_at is None or db_now <= drop.scheduled_at:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "not_yet_open", "message": "Drop isn't open yet."},
+        )
+
+    stmt = (
+        select(DropUnit)
+        .where(DropUnit.drop_id == id, DropUnit.status == DropUnitStatus.AVAILABLE)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+
+    unit = await db.scalar(stmt)
+
+    # SKIP LOCKED trade-off:
+    # An empty result means no *unlocked* available units exist right now.
+    # If a concurrent transaction holding a unit later rolls back, a client
+    # may have received sold_out even though inventory briefly returned.
+    if not unit:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "sold_out",
+                "message": "No units currently available for this drop.",
+            },
+        )
+
+    unit.status = DropUnitStatus.PURCHASED
+    unit.held_by_user_id = payload.user_id
+
+    await db.commit()
+
+    return unit
