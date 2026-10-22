@@ -1,6 +1,9 @@
+import asyncio
+from unittest.mock import AsyncMock, patch
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 import pytest
+from app.core.db import get_db
 
 
 @pytest.mark.asyncio
@@ -38,3 +41,18 @@ async def test_tables_exist(db_session: AsyncSession) -> None:
 
     assert "drops" in tables
     assert "drop_units" in tables
+
+
+@pytest.mark.asyncio
+async def test_get_db_cancelled_error_rollback() -> None:
+    session = AsyncMock(spec=AsyncSession)
+    session.__aenter__.return_value = session
+
+    with patch("app.core.db.AsyncSessionLocal", return_value=session):
+        gen = get_db()
+        await gen.__anext__()
+
+        with pytest.raises(asyncio.CancelledError):
+            await gen.athrow(asyncio.CancelledError())
+
+    session.rollback.assert_awaited_once()
