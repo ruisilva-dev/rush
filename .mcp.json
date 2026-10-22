@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "rush-tester": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--with",
+        "mcp",
+        "python",
+        "scripts/agent_tester_mcp.py"
+      ],
+      "env": {}
+    }
+  }
+}
