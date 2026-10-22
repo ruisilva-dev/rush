@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import text, String, DateTime, func, CheckConstraint, Integer
+from sqlalchemy import text, String, DateTime, func, CheckConstraint
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from uuid import UUID
@@ -38,7 +38,7 @@ class Drop(Base):
         default=DropStatus.DRAFT,
         nullable=False,
     )
-    total_units: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_units: Mapped[int] = mapped_column()
     scheduled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
