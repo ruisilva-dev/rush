@@ -1,13 +1,12 @@
 from typing import AsyncGenerator
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.pool import NullPool
 from app.core.config import Settings
 from app.main import app
 from app.core.db import get_db
-from app.models import Drop
 
 settings = Settings()
 
@@ -36,21 +35,23 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 async def committed_session() -> AsyncGenerator[AsyncSession, None]:
     engine = create_async_engine(settings.postgres_url, poolclass=NullPool)
 
-    async with engine.connect() as connection:
-        async with connection.begin():
-            session_factory = async_sessionmaker(
-                bind=engine,
-                class_=AsyncSession,
-                expire_on_commit=False,
-            )
+    session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
 
-            async with session_factory() as session:
-                yield session
+    async with session_factory() as session:
+        try:
+            yield session
+        finally:
+            # Clear any dangling or failed transaction state
+            await session.rollback()
+            await session.execute(text("SET LOCAL lock_timeout = '2s';"))
+            await session.execute(text("TRUNCATE TABLE drops CASCADE;"))
+            await session.commit()
 
-                await session.execute(delete(Drop))
-                await session.commit()
-
-            await engine.dispose()
+    await engine.dispose()
 
 
 @pytest_asyncio.fixture
@@ -69,7 +70,7 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 
 @pytest_asyncio.fixture
 async def concurrent_client() -> AsyncGenerator[AsyncClient, None]:
-    engine = create_async_engine(settings.postgres_url)
+    engine = create_async_engine(settings.postgres_url, poolclass=NullPool)
 
     session_factory = async_sessionmaker(
         bind=engine, class_=AsyncSession, expire_on_commit=False

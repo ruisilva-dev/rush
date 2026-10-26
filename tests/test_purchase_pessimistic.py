@@ -214,19 +214,20 @@ async def test_purchase_pessimistic_lock_held_deterministic(
 
     # Open uncommitted transaction holding a FOR UPDATE lock on the unit
     lock_stmt = select(DropUnit).where(DropUnit.id == unit.id).with_for_update()
-    locked_unit = await committed_session.scalar(lock_stmt)
-    assert locked_unit is not None
-
     user = str(uuid4())
     url = f"/drops/{drop.id}/purchase-pessimistic"
 
-    # Request while lock is held
-    res_blocked = await concurrent_client.post(url, json={"user_id": user})
-    assert res_blocked.status_code == 409
-    assert res_blocked.json()["detail"]["code"] == "sold_out"
+    try:
+        locked_unit = await committed_session.scalar(lock_stmt)
+        assert locked_unit is not None
 
-    # Release lock
-    await committed_session.rollback()
+        # Request while lock is held
+        res_blocked = await concurrent_client.post(url, json={"user_id": user})
+        assert res_blocked.status_code == 409
+        assert res_blocked.json()["detail"]["code"] == "sold_out"
+    finally:
+        # Release lock even if assertions fail
+        await committed_session.rollback()
 
     # Retry request
     res_success = await concurrent_client.post(url, json={"user_id": user})
