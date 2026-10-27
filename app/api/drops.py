@@ -119,94 +119,101 @@ async def get_drop(id: UUID, db: AsyncSession = Depends(get_db)) -> DropResponse
 async def purchase_naive(
     id: UUID, payload: PurchaseRequest, db: AsyncSession = Depends(get_db)
 ) -> PurchaseResponse:
-    stmt = select(Drop, func.now()).where(Drop.id == id)
-    result = await db.execute(stmt)
-    row = result.first()
+    async with db.begin():
+        stmt = select(Drop, func.now()).where(Drop.id == id)
+        result = await db.execute(stmt)
+        row = result.first()
 
-    if not row:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Drop with ID '{id}' not found",
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Drop with ID '{id}' not found",
+            )
+
+        drop, db_now = row
+        if drop.scheduled_at is None or db_now <= drop.scheduled_at:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "not_yet_open", "message": "Drop isn't open yet."},
+            )
+
+        stmt = (
+            select(DropUnit)
+            .where(DropUnit.drop_id == id, DropUnit.status == DropUnitStatus.AVAILABLE)
+            .limit(1)
         )
 
-    drop, db_now = row
-    if drop.scheduled_at is None or db_now <= drop.scheduled_at:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "not_yet_open", "message": "Drop isn't open yet."},
-        )
+        unit = await db.scalar(stmt)
+        if not unit:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "sold_out",
+                    "message": "No units remaining for this drop.",
+                },
+            )
 
-    stmt = (
-        select(DropUnit)
-        .where(DropUnit.drop_id == id, DropUnit.status == DropUnitStatus.AVAILABLE)
-        .limit(1)
-    )
+        # VULNERABLE: Baseline implementation without row-level locking
+        # (e.g., SELECT ... FOR UPDATE).
+        # Under concurrent load, multiple transactions can read and claim the same unit,
+        # causing overselling.
+        unit.status = DropUnitStatus.PURCHASED
+        unit.held_by_user_id = payload.user_id
 
-    unit = await db.scalar(stmt)
-    if not unit:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "sold_out", "message": "No units remaining for this drop."},
-        )
+        # Validate inside the transaction: a failure rolls back the purchase.
+        response = PurchaseResponse.model_validate(unit)
 
-    # VULNERABLE: Baseline implementation without row-level locking
-    # (e.g., SELECT ... FOR UPDATE).
-    # Under concurrent load, multiple transactions can read and claim the same unit,
-    # causing overselling.
-    unit.status = DropUnitStatus.PURCHASED
-    unit.held_by_user_id = payload.user_id
-
-    await db.commit()
-
-    return unit
+    return response
 
 
 @router.post("/{id}/purchase-pessimistic", response_model=PurchaseResponse)
 async def purchase_pessimistic(
     id: UUID, payload: PurchaseRequest, db: AsyncSession = Depends(get_db)
 ) -> PurchaseResponse:
-    stmt = select(Drop, func.now()).where(Drop.id == id)
-    result = await db.execute(stmt)
-    row = result.first()
+    async with db.begin():
+        stmt = select(Drop, func.now()).where(Drop.id == id)
+        result = await db.execute(stmt)
+        row = result.first()
 
-    if not row:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Drop with ID '{id}' not found",
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Drop with ID '{id}' not found",
+            )
+
+        drop, db_now = row
+        if drop.scheduled_at is None or db_now <= drop.scheduled_at:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "not_yet_open", "message": "Drop isn't open yet."},
+            )
+
+        stmt = (
+            select(DropUnit)
+            .where(DropUnit.drop_id == id, DropUnit.status == DropUnitStatus.AVAILABLE)
+            .with_for_update(skip_locked=True)
+            .limit(1)
         )
 
-    drop, db_now = row
-    if drop.scheduled_at is None or db_now <= drop.scheduled_at:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "not_yet_open", "message": "Drop isn't open yet."},
-        )
+        unit = await db.scalar(stmt)
 
-    stmt = (
-        select(DropUnit)
-        .where(DropUnit.drop_id == id, DropUnit.status == DropUnitStatus.AVAILABLE)
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    )
+        # SKIP LOCKED trade-off:
+        # An empty result means no *unlocked* available units exist right now.
+        # If a concurrent transaction holding a unit later rolls back, a client
+        # may have received sold_out even though inventory briefly returned.
+        if not unit:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "sold_out",
+                    "message": "No units currently available for this drop.",
+                },
+            )
 
-    unit = await db.scalar(stmt)
+        unit.status = DropUnitStatus.PURCHASED
+        unit.held_by_user_id = payload.user_id
 
-    # SKIP LOCKED trade-off:
-    # An empty result means no *unlocked* available units exist right now.
-    # If a concurrent transaction holding a unit later rolls back, a client
-    # may have received sold_out even though inventory briefly returned.
-    if not unit:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "sold_out",
-                "message": "No units currently available for this drop.",
-            },
-        )
+        # Validate inside the transaction: a failure rolls back the purchase.
+        response = PurchaseResponse.model_validate(unit)
 
-    unit.status = DropUnitStatus.PURCHASED
-    unit.held_by_user_id = payload.user_id
-
-    await db.commit()
-
-    return unit
+    return response

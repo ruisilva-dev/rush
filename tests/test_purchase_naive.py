@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 from app.models.drop import Drop, DropStatus
 from app.models.drop_unit import DropUnit, DropUnitStatus
+from app.schemas.purchase import PurchaseResponse
 
 
 @pytest.mark.asyncio
@@ -197,3 +198,39 @@ async def test_purchase_naive_race_condition_silent_oversell(
     await committed_session.refresh(unit)
     assert unit.status == DropUnitStatus.PURCHASED
     assert str(unit.held_by_user_id) in {user_a, user_b}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["purchase-naive", "purchase-pessimistic"])
+async def test_purchase_serialization_failure_rolls_back(
+    concurrent_client: AsyncClient,
+    committed_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    drop = Drop(
+        name="Rollback Drop",
+        status=DropStatus.ACTIVE,
+        total_units=1,
+        scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    committed_session.add(drop)
+    await committed_session.flush()
+    unit = DropUnit(drop_id=drop.id, status=DropUnitStatus.AVAILABLE)
+    committed_session.add(unit)
+    await committed_session.commit()
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("serialization failure")
+
+    monkeypatch.setattr(PurchaseResponse, "model_validate", boom)
+
+    with pytest.raises(RuntimeError):
+        await concurrent_client.post(
+            f"/drops/{drop.id}/{endpoint}",
+            json={"user_id": str(uuid4())},
+        )
+
+    await committed_session.refresh(unit)
+    assert unit.status == DropUnitStatus.AVAILABLE
+    assert unit.held_by_user_id is None

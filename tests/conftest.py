@@ -57,6 +57,10 @@ async def committed_session() -> AsyncGenerator[AsyncSession, None]:
 @pytest_asyncio.fixture
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        # Release the savepoint autobegun by test seeding so that route handlers
+        # can open their own `db.begin()` block (outer transaction still rolls back).
+        if db_session.in_transaction():
+            await db_session.commit()
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
