@@ -42,7 +42,9 @@ async def test_purchase_pessimistic_success_uncontended(
 
     await db_session.refresh(unit)
     assert unit.status == DropUnitStatus.PURCHASED
-    assert unit.held_by_user_id == buyer_id
+    assert unit.purchased_by_user_id == buyer_id
+    assert unit.purchased_at is not None
+    assert unit.held_by_user_id is None
 
 
 @pytest.mark.asyncio
@@ -109,7 +111,7 @@ async def test_purchase_pessimistic_sold_out(
     unit = DropUnit(
         drop_id=drop.id,
         status=DropUnitStatus.PURCHASED,
-        held_by_user_id=uuid4(),
+        purchased_by_user_id=uuid4(),
     )
     db_session.add(unit)
     await db_session.flush()
@@ -188,8 +190,8 @@ async def test_purchase_pessimistic_solve_silent_oversell(
 
     await committed_session.refresh(unit)
     assert unit.status == DropUnitStatus.PURCHASED
-    assert str(unit.held_by_user_id) in {user_a, user_b}
-    assert successes[0].json()["user_id"] == str(unit.held_by_user_id)
+    assert str(unit.purchased_by_user_id) in {user_a, user_b}
+    assert successes[0].json()["user_id"] == str(unit.purchased_by_user_id)
 
 
 @pytest.mark.asyncio
@@ -238,7 +240,7 @@ async def test_purchase_pessimistic_lock_held_deterministic(
     # Verify final database state
     await committed_session.refresh(unit)
     assert unit.status == DropUnitStatus.PURCHASED
-    assert str(unit.held_by_user_id) == user
+    assert str(unit.purchased_by_user_id) == user
 
 
 @pytest.mark.asyncio
@@ -290,4 +292,4 @@ async def test_purchase_pessimistic_multi_unit_contention(
 
     assert len(db_units) == unit_count
     assert all(u.status == DropUnitStatus.PURCHASED for u in db_units)
-    assert {str(u.held_by_user_id) for u in db_units} == expected_user_ids
+    assert {str(u.purchased_by_user_id) for u in db_units} == expected_user_ids

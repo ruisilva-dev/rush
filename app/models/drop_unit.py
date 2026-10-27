@@ -25,6 +25,11 @@ class DropUnit(Base):
             "drop_id",
             postgresql_where=text("status = 'available'"),
         ),
+        Index(
+            "ix_drop_units_purchased_by_user_id",
+            "purchased_by_user_id",
+            postgresql_where=text("purchased_by_user_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("uuidv7()"))
@@ -35,13 +40,20 @@ class DropUnit(Base):
         SAEnum(
             DropUnitStatus,
             name="drop_unit_status",
+            native_enum=True,
             values_callable=lambda x: [e.value for e in x],
         ),
         default=DropUnitStatus.AVAILABLE,
         nullable=False,
     )
+    # Temporary hold fields
     held_by_user_id: Mapped[UUID | None] = mapped_column(nullable=True)
     hold_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Finalized purchase fields
+    purchased_by_user_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    purchased_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(

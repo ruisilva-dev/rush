@@ -76,38 +76,10 @@ When tasked with resolving issues or bugs:
 
 ---
 
-## Appendix: Open Issues & Tech Debt Backlog (Dependency-Ordered)
+## Known Limitations (Accepted)
 
-### Group 1: Core Engine & Session Resilience (Foundation)
-*Specification*: [specs/01-core-engine-and-session-resilience.md](file:///home/rilay/rush/specs/01-core-engine-and-session-resilience.md)
-1. **Top-Level Settings Import Side-Effect (`app/core/db.py`)**:
-   - `settings = Settings()` runs at module import time in `app/core/db.py`. Because `Settings` requires `/run/secrets/db_user_password` by default, importing `app.main` or `app.core.db` outside Docker without environment overrides fails immediately with a `ValidationError`.
-2. **`BaseException` & Cancellation Vulnerability in `get_db()` (`app/core/db.py`)**:
-   - In `get_db()`, `except Exception:` catches standard exceptions but fails to catch `BaseException`. In Python 3.8+, `asyncio.CancelledError` inherits from `BaseException`. If a client disconnects while waiting on a row lock in `purchase_pessimistic`, `CancelledError` bypasses `await session.rollback()`.
-
-### Group 2: Test Harness & Concurrency Reliability (Testing Safety Net)
-*Specification*: [specs/02-test-harness-and-concurrency-reliability.md](file:///home/rilay/rush/specs/02-test-harness-and-concurrency-reliability.md)
-3. **Dead Connection & Transaction Overhead in `committed_session` (`tests/conftest.py`)**:
-   - `committed_session` runs `async with engine.connect() as connection: async with connection.begin():`, but binds `session_factory` to `engine` instead of `connection`. This opens an idle connection that is never used and leaks it for the duration of the test.
-4. **Dirty State Vulnerability & Lock Hangs in Concurrency Tests (`tests/conftest.py`, `tests/test_purchase_pessimistic.py`)**:
-   - Concurrency tests acquiring explicit row locks (`with_for_update`) that fail assertions before manual rollback leave open transactions. Fixture cleanup then invokes `delete(Drop)`, triggering potential deadlocks or `InFailedSqlTransactionError`.
-   - Deleting only `Drop` assumes cascade delete behavior for all future tables, with no database truncation or verification hook.
-
-### Group 3: API Transaction & Serialization Contracts (HTTP Layer)
-*Specification*: [specs/03-api-transaction-and-serialization-contracts.md](file:///home/rilay/rush/specs/03-api-transaction-and-serialization-contracts.md)
-5. **Divergent Transaction Boundary Ownership Across Endpoints (`app/api/drops.py`)**:
-   - `create_drop` wraps operations inside `async with db.begin():` (explicit transaction block auto-committing on exit).
-   - `purchase_naive` and `purchase_pessimistic` rely on implicit SQLAlchemy autobegin upon the first `select()`, and manually call `await db.commit()`.
-   - Read-only endpoints (`list_drops`, `get_drop`) autobegin a transaction upon `await db.execute()` that is never explicitly closed or committed, dangling until session teardown.
-   - Mixing `async with db.begin():` with pre-existing queries raises `InvalidRequestError: A transaction is already begun on this Session`.
-6. **Inconsistent Response Serialization Strategy (`app/api/drops.py`)**:
-   - `create_drop`, `list_drops`, and `get_drop` manually construct Pydantic `DropResponse` instances field-by-field.
-   - `purchase_naive` and `purchase_pessimistic` return the raw SQLAlchemy ORM model directly (`return unit`), relying on `response_model=PurchaseResponse` and `expire_on_commit=False`.
-   - All endpoints should standardize on returning validated Pydantic models (e.g., `return PurchaseResponse.model_validate(unit)`).
-
-### Group 4: Domain Schema & State Machine Evolution (Business Logic)
-*Specification*: [specs/04-domain-schema-and-state-machine-evolution.md](file:///home/rilay/rush/specs/04-domain-schema-and-state-machine-evolution.md)
-7. **Half-Implemented Hold Reservation & Semantic Field Conflation (`app/models/drop_unit.py`, `app/schemas/purchase.py`)**:
-   - `DropUnit` defines `held_by_user_id`, `hold_expires_at`, and status `DropUnitStatus.HELD`, but no hold logic exists. Purchases store buyer IDs into `held_by_user_id` alongside `status = PURCHASED`, aliased as `user_id` in `PurchaseResponse`. Storing purchase ownership in a hold field conflates temporary reservations with final purchases.
-8. **Static Drop Lifecycle State Machine (`app/models/drop.py`)**:
-   - `DropStatus` defines `ACTIVE` and `COMPLETED`, but the application never transitions drops into these states. Drops remain `SCHEDULED` or `DRAFT` permanently, even when `scheduled_at` has passed or available inventory reaches zero.
+### Stale `SCHEDULED` Status in Read Endpoints
+- **Behavior**: A drop moves `SCHEDULED` -> `ACTIVE` only inside the purchase endpoints. Until its first purchase, a drop whose `scheduled_at` has passed is still returned as `scheduled` by `GET /drops` and `GET /drops/{id}`.
+- **Impact**: Display only. Purchasing is unaffected: purchase endpoints compare `scheduled_at` to the DB clock and never read the stored `status`. `COMPLETED` is unaffected (set transactionally on the last purchase).
+- **Why accepted**: The project is backend-only and API consumers call endpoints directly. Do not "fix" this without a consumer that needs it.
+- **Required fix if a frontend (or any consumer that reads `status` from listings) is added**: derive the effective status at read time in `_drop_with_available_count_query()` (`CASE WHEN status = 'scheduled' AND scheduled_at <= now() THEN 'active' ELSE status END`) and use it in the `DropResponse` mapping. Write failing tests first.

@@ -1,7 +1,8 @@
 from fastapi import APIRouter, status, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import insert, literal, select, func, Select
+from sqlalchemy import insert, literal, select, func, Select, update
 from uuid import UUID
+from datetime import datetime
 from app.schemas.drop import DropResponse, DropCreateRequest
 from app.schemas.purchase import PurchaseResponse, PurchaseRequest
 from app.core.db import get_db
@@ -23,6 +24,40 @@ def _drop_with_available_count_query() -> Select:
         .scalar_subquery()
     )
     return select(Drop, available_subq.label("available_units"))
+
+
+async def _finalize_purchase(
+    db: AsyncSession,
+    drop: Drop,
+    unit: DropUnit,
+    user_id: UUID,
+    db_now: datetime,
+) -> None:
+    """Mark the unit purchased and advance the drop lifecycle."""
+    if drop.status == DropStatus.SCHEDULED and db_now >= drop.scheduled_at:
+        drop.status = DropStatus.ACTIVE
+
+    unit.status = DropUnitStatus.PURCHASED
+    unit.purchased_by_user_id = user_id
+    unit.purchased_at = db_now
+    await db.flush()
+
+    # Atomic conditional update: under READ COMMITTED the NOT EXISTS is
+    # re-evaluated after waiting on a concurrent writer, so the last
+    # purchaser always observes zero available units and completes the drop.
+    has_available = (
+        select(DropUnit.id)
+        .where(
+            DropUnit.drop_id == drop.id,
+            DropUnit.status == DropUnitStatus.AVAILABLE,
+        )
+        .exists()
+    )
+    await db.execute(
+        update(Drop)
+        .where(Drop.id == drop.id, ~has_available)
+        .values(status=DropStatus.COMPLETED)
+    )
 
 
 @router.post("", response_model=DropResponse, status_code=status.HTTP_201_CREATED)
@@ -157,8 +192,7 @@ async def purchase_naive(
         # (e.g., SELECT ... FOR UPDATE).
         # Under concurrent load, multiple transactions can read and claim the same unit,
         # causing overselling.
-        unit.status = DropUnitStatus.PURCHASED
-        unit.held_by_user_id = payload.user_id
+        await _finalize_purchase(db, drop, unit, payload.user_id, db_now)
 
         # Validate inside the transaction: a failure rolls back the purchase.
         response = PurchaseResponse.model_validate(unit)
@@ -210,8 +244,7 @@ async def purchase_pessimistic(
                 },
             )
 
-        unit.status = DropUnitStatus.PURCHASED
-        unit.held_by_user_id = payload.user_id
+        await _finalize_purchase(db, drop, unit, payload.user_id, db_now)
 
         # Validate inside the transaction: a failure rolls back the purchase.
         response = PurchaseResponse.model_validate(unit)

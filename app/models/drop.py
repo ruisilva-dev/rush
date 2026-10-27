@@ -33,6 +33,7 @@ class Drop(Base):
         SAEnum(
             DropStatus,
             name="drop_status",
+            native_enum=True,
             values_callable=lambda x: [e.value for e in x],
         ),
         default=DropStatus.DRAFT,

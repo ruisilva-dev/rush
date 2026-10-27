@@ -46,7 +46,9 @@ async def test_purchase_naive_success_uncontended(
     # Verify database state
     await db_session.refresh(unit)
     assert unit.status == DropUnitStatus.PURCHASED
-    assert unit.held_by_user_id == buyer_id
+    assert unit.purchased_by_user_id == buyer_id
+    assert unit.purchased_at is not None
+    assert unit.held_by_user_id is None
 
 
 @pytest.mark.asyncio
@@ -114,7 +116,7 @@ async def test_purchase_naive_sold_out(
     unit = DropUnit(
         drop_id=drop.id,
         status=DropUnitStatus.PURCHASED,
-        held_by_user_id=uuid4(),
+        purchased_by_user_id=uuid4(),
     )
     db_session.add(unit)
     await db_session.flush()
@@ -197,7 +199,7 @@ async def test_purchase_naive_race_condition_silent_oversell(
 
     await committed_session.refresh(unit)
     assert unit.status == DropUnitStatus.PURCHASED
-    assert str(unit.held_by_user_id) in {user_a, user_b}
+    assert str(unit.purchased_by_user_id) in {user_a, user_b}
 
 
 @pytest.mark.asyncio
@@ -233,4 +235,4 @@ async def test_purchase_serialization_failure_rolls_back(
 
     await committed_session.refresh(unit)
     assert unit.status == DropUnitStatus.AVAILABLE
-    assert unit.held_by_user_id is None
+    assert unit.purchased_by_user_id is None
