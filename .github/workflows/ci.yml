@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.7"
+          enable-cache: true
+
+      - name: Ruff lint
+        run: uv run --locked ruff check app alembic tests
+
+      - name: Ruff format check
+        run: uv run --locked ruff format --check app alembic tests
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      COMPOSE: docker compose --env-file /dev/null -f docker-compose.test.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      # docker-compose.test.yml reads this file as a Compose secret.
+      - name: Create test DB secret
+        run: mkdir -p secrets && echo ci-test-pw > secrets/db_user_password.txt
+
+      - name: Run migrations and tests
+        run: $COMPOSE run -T --build --rm test sh -c "alembic upgrade head && pytest -q"
+
+      - name: Tear down
+        if: always()
+        run: $COMPOSE down -v --remove-orphans
