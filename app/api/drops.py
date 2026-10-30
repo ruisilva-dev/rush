@@ -42,9 +42,14 @@ async def _finalize_purchase(
     unit.purchased_at = db_now
     await db.flush()
 
-    # Atomic conditional update: under READ COMMITTED the NOT EXISTS is
-    # re-evaluated after waiting on a concurrent writer, so the last
-    # purchaser always observes zero available units and completes the drop.
+    # Serialize finalization per drop. Under READ COMMITTED the NOT EXISTS below
+    # only sees *committed* purchases, and SKIP LOCKED lets buyers of different
+    # units run in parallel, so two concurrent last-unit buyers would each see the
+    # other's unit as still available and neither would complete the drop. Taking
+    # the drop row lock makes the later buyer wait for the earlier commit, and its
+    # conditional UPDATE (a new statement, hence a new snapshot) then observes it.
+    await db.execute(select(Drop.id).where(Drop.id == drop.id).with_for_update())
+
     has_available = (
         select(DropUnit.id)
         .where(
@@ -166,7 +171,7 @@ async def purchase_naive(
             )
 
         drop, db_now = row
-        if drop.scheduled_at is None or db_now <= drop.scheduled_at:
+        if drop.scheduled_at is None or db_now < drop.scheduled_at:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "not_yet_open", "message": "Drop isn't open yet."},
@@ -216,7 +221,7 @@ async def purchase_pessimistic(
             )
 
         drop, db_now = row
-        if drop.scheduled_at is None or db_now <= drop.scheduled_at:
+        if drop.scheduled_at is None or db_now < drop.scheduled_at:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "not_yet_open", "message": "Drop isn't open yet."},
