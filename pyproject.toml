@@ -1,7 +1,7 @@
 [project]
 name = "rush"
 version = "0.1.0"
-description = "Add your description here"
+description = "Flash-sale inventory API that prevents overselling under concurrent load"
 readme = "README.md"
 authors = [
     { name = "Rui Silva", email = "77292122+ruisilva-dev@users.noreply.github.com" }
