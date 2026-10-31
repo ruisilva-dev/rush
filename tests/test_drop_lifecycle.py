@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.drop import Drop, DropStatus
 from app.models.drop_unit import DropUnit, DropUnitStatus
 
-ENDPOINTS = ["purchase-naive", "purchase-pessimistic"]
+ENDPOINTS = ["purchase-naive", "purchase-pessimistic", "purchase-optimistic"]
 
 
 async def _seed_drop(
@@ -109,6 +109,62 @@ async def test_purchase_pessimistic_concurrent_last_units_complete_active_drop(
         *(
             concurrent_client.post(
                 f"/drops/{drop_id}/purchase-pessimistic",
+                json={"user_id": str(uuid4())},
+            )
+            for drop_id in drop_ids
+            for _ in range(2)
+        )
+    )
+
+    assert all(r.status_code == 200 for r in responses)
+    statuses = (
+        await committed_session.scalars(
+            select(Drop.status)
+            .where(Drop.id.in_(drop_ids))
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    assert statuses == [DropStatus.COMPLETED] * len(drop_ids)
+
+
+@pytest.mark.asyncio
+async def test_purchase_optimistic_concurrent_last_units_complete_drop(
+    committed_session: AsyncSession, concurrent_client: AsyncClient
+) -> None:
+    drop = await _seed_drop(committed_session, 2, DropStatus.SCHEDULED)
+    await committed_session.commit()
+    url = f"/drops/{drop.id}/purchase-optimistic"
+
+    responses = await asyncio.gather(
+        *(concurrent_client.post(url, json={"user_id": str(uuid4())}) for _ in range(2))
+    )
+
+    assert all(r.status_code == 200 for r in responses)
+    status = await committed_session.scalar(
+        select(Drop.status)
+        .where(Drop.id == drop.id)
+        .execution_options(populate_existing=True)
+    )
+    assert status == DropStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_purchase_optimistic_concurrent_last_units_complete_active_drop(
+    committed_session: AsyncSession, concurrent_client: AsyncClient
+) -> None:
+    # An already-ACTIVE drop has no status change to serialize the buyers on the
+    # drops row, so completion relies solely on the conditional UPDATE. Many drops
+    # in flight at once make the interleaving likely.
+    drops = [
+        await _seed_drop(committed_session, 2, DropStatus.ACTIVE) for _ in range(20)
+    ]
+    await committed_session.commit()
+    drop_ids = [d.id for d in drops]
+
+    responses = await asyncio.gather(
+        *(
+            concurrent_client.post(
+                f"/drops/{drop_id}/purchase-optimistic",
                 json={"user_id": str(uuid4())},
             )
             for drop_id in drop_ids
